@@ -1,0 +1,6 @@
+{
+    "sock_path": "~/.agent/sock",
+    "key_path": "~/.agent/key.json",
+    "db_path": "~/.agent/contacts.db",
+    "debug": false
+}

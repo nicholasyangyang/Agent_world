@@ -1,19 +1,33 @@
-"""CLI commands for Agent World."""
+"""CLI commands for Agent World (Nostr-based)."""
 import asyncio
 import json
+import logging
 import sys
 from pathlib import Path
 
 import click
 
-from config_loader import load_config, DEFAULT_CLI_CONFIG
+PROJECT_ROOT = Path(__file__).parent.parent
+DEFAULT_CONFIG = PROJECT_ROOT / "Default_config" / "cli_config.json"
 
 CLI_DEFAULTS = {
     "sock_path": "~/.agent/sock",
+    "key_path": "~/.agent/key.json",
+    "db_path": "~/.agent/contacts.db",
+    "debug": False,
 }
 
-# Module-level sock path, updated by cli group callback
 _sock_path: Path = Path.home() / ".agent" / "sock"
+_debug: bool = False
+
+
+def _load_config(config_path: str | None) -> dict:
+    cfg = dict(CLI_DEFAULTS)
+    path = Path(config_path or DEFAULT_CONFIG).expanduser()
+    if path.exists():
+        with open(path, "r", encoding="utf-8") as f:
+            cfg.update(json.load(f))
+    return cfg
 
 
 async def _send_ipc(cmd: str, args: dict) -> dict:
@@ -22,184 +36,206 @@ async def _send_ipc(cmd: str, args: dict) -> dict:
             asyncio.open_unix_connection(str(_sock_path)), timeout=3.0
         )
     except Exception:
-        click.echo("✗ gateway 未运行")
+        click.echo("✗ gateway 未运行，请先启动: python -m client.gateway")
         sys.exit(1)
 
     req = json.dumps({"cmd": cmd, "args": args}) + "\n"
+    if _debug:
+        click.echo(f"[DEBUG] → {req.strip()}")
     writer.write(req.encode())
     await writer.drain()
 
     raw = await asyncio.wait_for(reader.readline(), timeout=10.0)
     writer.close()
     await writer.wait_closed()
-    return json.loads(raw.decode())
+    resp = json.loads(raw.decode())
+    if _debug:
+        click.echo(f"[DEBUG] ← {json.dumps(resp, ensure_ascii=False)[:200]}")
+    return resp
 
 
-def send_to_gateway(cmd: str, args: dict = None) -> dict:
+def send(cmd: str, args: dict = None) -> dict:
     return asyncio.run(_send_ipc(cmd, args or {}))
 
 
+# --- Click Group ---
+
 @click.group()
-@click.option("--config", default=None, help="Path to config JSON file")
-def cli(config):
-    """Agent World CLI."""
-    global _sock_path
-    cfg = load_config(config or DEFAULT_CLI_CONFIG, CLI_DEFAULTS)
+@click.option("--config", default=None, help="Path to config JSON")
+@click.option("--debug", is_flag=True, help="Enable debug output")
+def cli(config, debug):
+    """Agent World CLI (Nostr)"""
+    global _sock_path, _debug
+    cfg = _load_config(config)
     _sock_path = Path(cfg["sock_path"]).expanduser()
+    _debug = debug or cfg.get("debug", False)
+    if _debug:
+        logging.basicConfig(level=logging.DEBUG)
 
 
-@cli.command()
-@click.argument("text", nargs=-1, required=True)
-def say(text):
-    """公开发言。"""
-    res = send_to_gateway("say", {"text": " ".join(text)})
-    click.echo(res["output"])
-
+# --- Messaging ---
 
 @cli.command()
 @click.argument("target")
 @click.argument("text", nargs=-1, required=True)
-def whisper(target, text):
-    """私聊。格式: whisper <target> <message>"""
-    res = send_to_gateway("whisper", {"target": target, "text": " ".join(text)})
-    click.echo(res["output"])
-
-
-@cli.command()
-@click.argument("icon")
-@click.argument("parts", nargs=-1, required=True)
-def place(icon, parts):
-    """放置物品。格式: place <icon> <name> [-- <description>]"""
-    raw = " ".join(parts)
-    if " -- " in raw:
-        name, desc = raw.split(" -- ", 1)
-        name = name.strip()
-    else:
-        name, desc = raw.strip(), ""
-    res = send_to_gateway("place", {"icon": icon, "name": name, "description": desc})
-    click.echo(res["output"])
-
-
-@cli.command()
-@click.argument("name")
-def remove(name):
-    """移除物品。"""
-    res = send_to_gateway("remove", {"name": name})
-    click.echo(res["output"])
-
-
-@cli.command()
-@click.argument("description", nargs=-1, required=True)
-def desc(description):
-    """设置房间描述。"""
-    res = send_to_gateway("desc", {"description": " ".join(description)})
-    click.echo(res["output"])
-
-
-@cli.command()
-@click.argument("item_name", required=False)
-def look(item_name):
-    """查看当前房间或物品。"""
-    args = {}
-    if item_name:
-        args["item_name"] = item_name
-    res = send_to_gateway("look", args)
-    click.echo(res["output"])
-
-
-@cli.command()
-def who():
-    """查看当前房间成员。"""
-    res = send_to_gateway("who")
-    click.echo(res["output"])
-
-
-@cli.command(name="list")
-def list_cmd():
-    """查看所有在线玩家。"""
-    res = send_to_gateway("list")
-    click.echo(res["output"])
-
-
-@cli.command()
-@click.argument("target")
-def knock(target):
-    """敲门请求拜访。"""
-    res = send_to_gateway("knock", {"target": target})
-    click.echo(res["output"])
-
-
-@cli.command()
-@click.argument("requester")
-def accept(requester):
-    """接受来访请求。"""
-    res = send_to_gateway("accept", {"to": requester})
-    click.echo(res["output"])
-
-
-@cli.command()
-@click.argument("requester")
-def reject(requester):
-    """拒绝来访请求。"""
-    res = send_to_gateway("reject", {"to": requester})
-    click.echo(res["output"])
-
-
-@cli.command()
-@click.argument("target")
-def enter(target):
-    """进入已接受的房间。"""
-    res = send_to_gateway("enter", {"target": target})
-    click.echo(res["output"])
-
-
-@cli.command()
-def home():
-    """回到自己的房间。"""
-    res = send_to_gateway("home")
+def msg(target, text):
+    """发送 NIP-17 加密私信。"""
+    res = send("msg", {"target": target, "text": " ".join(text)})
     click.echo(res["output"])
 
 
 @cli.command()
 def inbox():
     """查看未读消息。"""
-    res = send_to_gateway("inbox")
-    msgs = res.get("messages", [])
-    if not msgs:
+    res = send("inbox")
+    messages = res.get("messages", [])
+    notifications = res.get("notifications", [])
+
+    if not messages and not notifications:
         click.echo("📬 暂无新消息")
         return
-    click.echo(f"📬 {len(msgs)} 条新消息:")
-    for m in msgs:
-        t = m.get("type", "")
-        if t == "SAID":
-            click.echo(f"  [{m['from']}] {m['text']}")
-        elif t == "WHISPERED":
-            click.echo(f"  [私聊 ← {m['from']}] {m['text']}")
-        elif t == "KNOCK_RECEIVED":
-            click.echo(f"  🔔 {m['from']} 请求来访")
-        elif t == "KNOCK_ACCEPTED":
-            click.echo(f"  ✓ {m['from']} 接受了你的来访")
-        elif t == "KNOCK_REJECTED":
-            click.echo(f"  ✗ {m['from']} 拒绝了你的来访")
-        elif t == "VISITOR_JOINED":
-            click.echo(f"  → {m['agent']} 进入了房间")
-        elif t == "VISITOR_LEFT":
-            click.echo(f"  ← {m['agent']} 离开了房间")
-        else:
-            click.echo(f"  {t}: {m}")
+
+    if notifications:
+        click.echo(f"📬 {len(notifications)} 条通知:")
+        for n in notifications:
+            t = n.get("type", "")
+            if t == "dm":
+                click.echo(f"  [{n.get('from', '?')[:12]}..] {n.get('text', '')}")
+            elif t == "group_invite":
+                click.echo(f"  📨 收到群组 '{n.get('group')}' 邀请 (来自 {n.get('from', '?')[:12]}..)")
+            elif t == "group_accept":
+                click.echo(f"  ✓ {n.get('from', '?')[:12]}.. 加入了 '{n.get('group')}'")
+            elif t == "group_leave":
+                click.echo(f"  👋 {n.get('from', '?')[:12]}.. 离开了 '{n.get('group')}'")
+            else:
+                click.echo(f"  {t}: {n}")
+
+    if messages:
+        click.echo(f"📬 {len(messages)} 条消息:")
+        for m in messages:
+            from_npub = m.get("from_npub", "?")
+            text_val = m.get("text", "")
+            group = m.get("group_name")
+            if group:
+                click.echo(f"  [{group}] {from_npub[:12]}.. : {text_val}")
+            else:
+                click.echo(f"  [{from_npub[:12]}..] {text_val}")
+
+
+# --- Contacts ---
+
+@cli.command()
+def contacts():
+    """查看联系人列表。"""
+    res = send("contacts")
+    click.echo(res["output"])
 
 
 @cli.command()
+@click.argument("npub")
+@click.argument("nickname")
+def add(npub, nickname):
+    """添加联系人备注。"""
+    res = send("add_contact", {"npub": npub, "nickname": nickname})
+    click.echo(res["output"])
+
+
+@cli.command()
+@click.argument("nickname")
+def rm(nickname):
+    """删除联系人。"""
+    res = send("rm_contact", {"nickname": nickname})
+    click.echo(res["output"])
+
+
+@cli.command()
+def whoami():
+    """显示自己的 npub。"""
+    res = send("whoami")
+    click.echo(res["output"])
+
+
+# --- Groups ---
+
+@cli.group(name="group")
+def group_cmd():
+    """群组管理。"""
+
+
+@group_cmd.command(name="create")
+@click.argument("name")
+def group_create(name):
+    """创建群组。"""
+    res = send("group_create", {"name": name})
+    click.echo(res["output"])
+
+
+@group_cmd.command(name="invite")
+@click.argument("group_name")
+@click.argument("nickname")
+def group_invite(group_name, nickname):
+    """邀请联系人加入群组。"""
+    res = send("group_invite", {"group": group_name, "nickname": nickname})
+    click.echo(res["output"])
+
+
+@group_cmd.command(name="join")
+@click.argument("inviter_npub")
+@click.argument("group_name")
+def group_join(inviter_npub, group_name):
+    """接受群组邀请。"""
+    res = send("group_join", {"npub": inviter_npub, "group": group_name})
+    click.echo(res["output"])
+
+
+@group_cmd.command(name="members")
+@click.argument("group_name")
+def group_members(group_name):
+    """查看群组成员。"""
+    res = send("group_members", {"group": group_name})
+    click.echo(res["output"])
+
+
+@group_cmd.command(name="leave")
+@click.argument("group_name")
+def group_leave(group_name):
+    """离开群组。"""
+    res = send("group_leave", {"group": group_name})
+    click.echo(res["output"])
+
+
+@group_cmd.command(name="list")
+def group_list():
+    """列出所有群组。"""
+    res = send("groups")
+    click.echo(res["output"])
+
+
+# --- Home TUI ---
+
+@cli.command()
+@click.argument("group_name")
+def home(group_name):
+    """进入群组 Home TUI (坐标系统)。"""
+    from client.tui import run_tui
+    cfg = _load_config(None)
+    sock = Path(cfg["sock_path"]).expanduser()
+    run_tui(group_name, str(sock), _debug)
+
+
+# --- System ---
+
+@cli.command()
 def status():
-    """查看当前状态。"""
-    res = send_to_gateway("status")
+    """查看 gateway 状态。"""
+    res = send("status")
     click.echo(res["output"])
 
 
 @cli.command()
 def stop():
     """停止 gateway。"""
-    res = send_to_gateway("stop")
+    res = send("stop")
     click.echo(res["output"])
 
 

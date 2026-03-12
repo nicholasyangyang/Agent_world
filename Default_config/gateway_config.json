@@ -1,0 +1,12 @@
+{
+    "relays": [
+        "wss://relay.damus.io",
+        "wss://nos.lol",
+        "wss://relay.nostr.band"
+    ],
+    "sock_path": "~/.agent/sock",
+    "key_path": "~/.agent/key.json",
+    "db_path": "~/.agent/contacts.db",
+    "proxy": "",
+    "debug": false
+}

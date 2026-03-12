@@ -1,78 +1,185 @@
 """
-Gateway daemon: maintains WebSocket connection to server,
-exposes IPC via Unix Domain Socket.
+Gateway daemon: connects to Nostr relays, handles NIP-17 DMs,
+exposes IPC via Unix Domain Socket for CLI.
 """
 import asyncio
 import atexit
 import json
 import logging
-import os
 import signal
 import sys
 from pathlib import Path
-from types import SimpleNamespace
 
-import websockets
-
-import protocol as P
-from config_loader import load_config, DEFAULT_GATEWAY_CONFIG
+from nostr_client import NostrDMClient, load_or_create_keys, npub_short
+import local_db as DB
 
 logger = logging.getLogger(__name__)
 
+PROJECT_ROOT = Path(__file__).parent.parent
+DEFAULT_CONFIG = PROJECT_ROOT / "Default_config" / "gateway_config.json"
+
 GATEWAY_DEFAULTS = {
-    "server_url": "ws://127.0.0.1:8765",
+    "relays": ["wss://relay.damus.io", "wss://nos.lol", "wss://relay.nostr.band"],
     "sock_path": "~/.agent/sock",
-    "ipc_timeout": 10.0,
+    "key_path": "~/.agent/key.json",
+    "db_path": "~/.agent/contacts.db",
+    "proxy": "",
+    "debug": False,
 }
 
-SOCK_PATH = Path.home() / ".agent" / "sock"
-SERVER_URL_DEFAULT = "ws://127.0.0.1:8765"
-IPC_TIMEOUT = 10.0
+
+def load_config(config_path: str | None) -> dict:
+    cfg = dict(GATEWAY_DEFAULTS)
+    path = Path(config_path or DEFAULT_CONFIG).expanduser()
+    if path.exists():
+        with open(path, "r", encoding="utf-8") as f:
+            cfg.update(json.load(f))
+    return cfg
 
 
 class GatewayState:
-    def __init__(self, agent_id: str, ws):
-        self.agent_id = agent_id
-        self.ws = ws
+    def __init__(self, nostr: NostrDMClient, db, own_npub: str):
+        self.nostr = nostr
+        self.db = db
+        self.own_npub = own_npub
         self.message_queue: list[dict] = []
-        self.pending_response: asyncio.Queue = asyncio.Queue()
-        self.current_room: str | None = None
-        self._shutdown_event: asyncio.Event = asyncio.Event()
+        self.group_subscribers: dict[str, list[asyncio.StreamWriter]] = {}
+        self._shutdown = asyncio.Event()
+        self._connected_relays: list[str] = []
+        self._msg_count = 0
 
 
-async def ws_recv_loop(state: GatewayState) -> None:
+async def handle_incoming_dm(state: GatewayState, sender_npub: str, content: str):
+    """Process an incoming NIP-17 DM."""
+    state._msg_count += 1
+
+    # Try to parse as group protocol message
     try:
-        async for raw in state.ws:
-            msg = json.loads(raw)
-            msg_type = msg.get("type", "")
-            if msg_type in P.PUSH_TYPES:
-                state.message_queue.append(msg)
-            else:
-                await state.pending_response.put(msg)
-            if msg_type == "ENTER_OK":
-                state.current_room = msg.get("room", {}).get("owner")
-            elif msg_type == "HOME_OK":
-                state.current_room = None
-    except Exception as e:
-        logger.error("WebSocket recv error: %s", e)
+        data = json.loads(content)
+        if isinstance(data, dict) and "type" in data:
+            await handle_group_message(state, sender_npub, data)
+            return
+    except (json.JSONDecodeError, KeyError):
+        pass
+
+    # Plain text DM
+    display = await DB.get_display_name(state.db, sender_npub)
+    await DB.save_message(state.db, sender_npub, content)
+    state.message_queue.append({
+        "type": "dm", "from": sender_npub, "text": content
+    })
+    logger.info("📩 DM from %s: %s", display, content[:80])
 
 
-async def handle_ipc_connection(
-    reader: asyncio.StreamReader,
-    writer: asyncio.StreamWriter,
-    state: GatewayState,
-) -> None:
+async def handle_group_message(state: GatewayState, sender_npub: str, data: dict):
+    """Handle group protocol messages."""
+    msg_type = data.get("type")
+    group = data.get("group", "")
+    from_npub = data.get("from_npub", sender_npub)
+    display = await DB.get_display_name(state.db, from_npub)
+
+    if msg_type == "group_invite":
+        state.message_queue.append({
+            "type": "group_invite", "group": group, "from": from_npub
+        })
+        logger.info("📨 Group invite to '%s' from %s", group, display)
+
+    elif msg_type == "group_accept":
+        # Add member and broadcast updated member list
+        if await DB.group_exists(state.db, group):
+            await DB.add_member(state.db, group, from_npub)
+            members = await DB.get_members(state.db, group)
+            await broadcast_members_sync(state, group, members, exclude=from_npub)
+            state.message_queue.append({
+                "type": "group_accept", "group": group, "from": from_npub
+            })
+            logger.info("✓ %s joined group '%s'", display, group)
+
+    elif msg_type == "group_members_sync":
+        members = data.get("members", [])
+        await DB.sync_members(state.db, group, members)
+        state.message_queue.append({
+            "type": "group_members_sync", "group": group, "members": members
+        })
+        logger.info("🔄 Group '%s' synced: %d members", group, len(members))
+
+    elif msg_type == "group_position":
+        x, y = data.get("x", 0), data.get("y", 0)
+        # Forward to TUI subscribers
+        event = {"type": "position", "group": group, "npub": from_npub, "x": x, "y": y}
+        await push_to_group_subscribers(state, group, event)
+        logger.debug("📍 %s moved to (%d,%d) in '%s'", display, x, y, group)
+
+    elif msg_type == "group_leave":
+        if await DB.group_exists(state.db, group):
+            await DB.remove_member(state.db, group, from_npub)
+        state.message_queue.append({
+            "type": "group_leave", "group": group, "from": from_npub
+        })
+        event = {"type": "leave", "group": group, "npub": from_npub}
+        await push_to_group_subscribers(state, group, event)
+        logger.info("👋 %s left group '%s'", display, group)
+
+
+async def broadcast_members_sync(
+    state: GatewayState, group: str, members: list[str], exclude: str = None
+):
+    """Send group_members_sync to all members via NIP-17."""
+    payload = json.dumps({
+        "type": "group_members_sync", "group": group, "members": members
+    })
+    for npub in members:
+        if npub != exclude and npub != state.own_npub:
+            try:
+                await state.nostr.send_dm(npub, payload)
+            except Exception as e:
+                logger.warning("Failed to sync to %s: %s", npub_short(npub), e)
+
+
+async def push_to_group_subscribers(state: GatewayState, group: str, event: dict):
+    """Push event to TUI subscribers for a group."""
+    writers = state.group_subscribers.get(group, [])
+    dead = []
+    for w in writers:
+        try:
+            w.write((json.dumps(event) + "\n").encode())
+            await w.drain()
+        except Exception:
+            dead.append(w)
+    for w in dead:
+        writers.remove(w)
+
+
+# --- IPC ---
+
+async def handle_ipc(reader: asyncio.StreamReader, writer: asyncio.StreamWriter, state: GatewayState):
     try:
         raw = await asyncio.wait_for(reader.readline(), timeout=5.0)
+        if not raw:
+            writer.close()
+            return
         req = json.loads(raw.decode())
     except Exception:
         writer.close()
         return
 
-    cmd = req.get("cmd")
+    cmd = req.get("cmd", "")
     args = req.get("args", {})
-    response = await handle_ipc_cmd(cmd, args, state)
+    logger.debug("IPC cmd: %s %s", cmd, args)
 
+    # Streaming command for TUI
+    if cmd == "group_subscribe":
+        group = args.get("group", "")
+        if group not in state.group_subscribers:
+            state.group_subscribers[group] = []
+        state.group_subscribers[group].append(writer)
+        # Send initial ack
+        writer.write((json.dumps({"ok": True, "type": "subscribed"}) + "\n").encode())
+        await writer.drain()
+        # Keep connection open — TUI will close when done
+        return
+
+    response = await handle_ipc_cmd(cmd, args, state)
     writer.write((json.dumps(response) + "\n").encode())
     await writer.drain()
     writer.close()
@@ -80,124 +187,170 @@ async def handle_ipc_connection(
 
 
 async def handle_ipc_cmd(cmd: str, args: dict, state: GatewayState) -> dict:
-    if cmd == "inbox":
-        msgs = list(state.message_queue)
-        state.message_queue.clear()
-        return {"ok": True, "messages": msgs}
-
     if cmd == "status":
-        room = state.current_room or state.agent_id
-        return {"ok": True, "output": f"✓ {state.agent_id} @ {room}"}
+        return {
+            "ok": True,
+            "output": (
+                f"npub: {state.own_npub}\n"
+                f"Relays: {len(state._connected_relays)} connected\n"
+                f"Messages received: {state._msg_count}"
+            )
+        }
 
     if cmd == "stop":
-        state._shutdown_event.set()
+        state._shutdown.set()
         return {"ok": True, "output": "✓ gateway 正在停止"}
 
-    ws_msg = _build_ws_msg(cmd, args)
-    if ws_msg is None:
-        return {"ok": False, "output": f"✗ 未知命令: {cmd}"}
+    if cmd == "whoami":
+        return {"ok": True, "output": state.own_npub}
 
-    try:
-        await state.ws.send(json.dumps(ws_msg))
-    except Exception as e:
-        return {"ok": False, "output": f"✗ 发送失败: {e}"}
+    if cmd == "inbox":
+        unread = await DB.get_unread(state.db)
+        await DB.mark_all_read(state.db)
+        # Also drain push queue
+        queued = list(state.message_queue)
+        state.message_queue.clear()
+        return {"ok": True, "messages": unread, "notifications": queued}
 
-    if cmd in ("say", "whisper", "accept", "reject"):
-        return {"ok": True, "output": "✓ 已发送"}
+    if cmd == "msg":
+        target_name = args.get("target", "")
+        text = args.get("text", "")
+        npub = await DB.resolve_name(state.db, target_name)
+        if not npub:
+            return {"ok": False, "output": f"✗ 未找到联系人: {target_name}"}
+        try:
+            await state.nostr.send_dm(npub, text)
+            display = await DB.get_display_name(state.db, npub)
+            return {"ok": True, "output": f"✓ 已发送给 {display}"}
+        except Exception as e:
+            return {"ok": False, "output": f"✗ 发送失败: {e}"}
 
-    if cmd == "knock":
-        return {"ok": True, "output": f"⏳ 已向 {args.get('target')} 发送拜访请求"}
+    if cmd == "contacts":
+        contacts = await DB.get_contacts(state.db)
+        if not contacts:
+            return {"ok": True, "output": "暂无联系人"}
+        lines = [f"  @{c['nickname']}  {c['npub'][:20]}.." for c in contacts]
+        return {"ok": True, "output": "联系人:\n" + "\n".join(lines)}
 
-    try:
-        resp = await asyncio.wait_for(state.pending_response.get(), timeout=IPC_TIMEOUT)
-    except asyncio.TimeoutError:
-        return {"ok": False, "output": "✗ 服务器响应超时"}
+    if cmd == "add_contact":
+        npub = args.get("npub", "")
+        nickname = args.get("nickname", "")
+        if not npub.startswith("npub1") or not nickname:
+            return {"ok": False, "output": "✗ 需要有效的 npub 和昵称"}
+        await DB.add_contact(state.db, npub, nickname)
+        return {"ok": True, "output": f"✓ 已添加 @{nickname}"}
 
-    return _format_response(cmd, resp, state)
+    if cmd == "rm_contact":
+        nickname = args.get("nickname", "")
+        removed = await DB.remove_contact(state.db, nickname)
+        if removed:
+            return {"ok": True, "output": f"✓ 已删除 @{nickname}"}
+        return {"ok": False, "output": f"✗ 未找到 @{nickname}"}
+
+    # --- Group commands ---
+
+    if cmd == "group_create":
+        name = args.get("name", "")
+        if await DB.group_exists(state.db, name):
+            return {"ok": False, "output": f"✗ 群组 '{name}' 已存在"}
+        await DB.create_group(state.db, name, state.own_npub)
+        return {"ok": True, "output": f"✓ 已创建群组 '{name}'"}
+
+    if cmd == "group_invite":
+        group = args.get("group", "")
+        nickname = args.get("nickname", "")
+        npub = await DB.resolve_name(state.db, nickname)
+        if not npub:
+            return {"ok": False, "output": f"✗ 未找到联系人: {nickname}"}
+        if not await DB.group_exists(state.db, group):
+            return {"ok": False, "output": f"✗ 群组 '{group}' 不存在"}
+        payload = json.dumps({
+            "type": "group_invite", "group": group, "from_npub": state.own_npub
+        })
+        try:
+            await state.nostr.send_dm(npub, payload)
+            return {"ok": True, "output": f"✓ 已邀请 @{nickname} 加入 '{group}'"}
+        except Exception as e:
+            return {"ok": False, "output": f"✗ 邀请失败: {e}"}
+
+    if cmd == "group_join":
+        inviter_npub = args.get("npub", "")
+        group = args.get("group", "")
+        if not inviter_npub or not group:
+            return {"ok": False, "output": "✗ 需要 npub 和群组名"}
+        payload = json.dumps({
+            "type": "group_accept", "group": group, "from_npub": state.own_npub
+        })
+        try:
+            await state.nostr.send_dm(inviter_npub, payload)
+            # Add self to local group
+            if not await DB.group_exists(state.db, group):
+                await DB.create_group(state.db, group, state.own_npub)
+            return {"ok": True, "output": f"✓ 已接受加入 '{group}'"}
+        except Exception as e:
+            return {"ok": False, "output": f"✗ 加入失败: {e}"}
+
+    if cmd == "group_members":
+        group = args.get("group", "")
+        if not await DB.group_exists(state.db, group):
+            return {"ok": False, "output": f"✗ 群组 '{group}' 不存在"}
+        members = await DB.get_members(state.db, group)
+        lines = []
+        for m in members:
+            display = await DB.get_display_name(state.db, m)
+            marker = " (你)" if m == state.own_npub else ""
+            lines.append(f"  {display}{marker}")
+        return {"ok": True, "output": f"群组 '{group}' 成员:\n" + "\n".join(lines)}
+
+    if cmd == "group_leave":
+        group = args.get("group", "")
+        if not await DB.group_exists(state.db, group):
+            return {"ok": False, "output": f"✗ 群组 '{group}' 不存在"}
+        members = await DB.get_members(state.db, group)
+        payload = json.dumps({
+            "type": "group_leave", "group": group, "from_npub": state.own_npub
+        })
+        for m in members:
+            if m != state.own_npub:
+                try:
+                    await state.nostr.send_dm(m, payload)
+                except Exception:
+                    pass
+        await DB.remove_member(state.db, group, state.own_npub)
+        await DB.delete_group(state.db, group)
+        return {"ok": True, "output": f"✓ 已离开 '{group}'"}
+
+    if cmd == "group_position":
+        group = args.get("group", "")
+        x, y = args.get("x", 0), args.get("y", 0)
+        if not await DB.group_exists(state.db, group):
+            return {"ok": False, "output": f"✗ 群组 '{group}' 不存在"}
+        members = await DB.get_members(state.db, group)
+        payload = json.dumps({
+            "type": "group_position", "group": group,
+            "x": x, "y": y, "from_npub": state.own_npub
+        })
+        for m in members:
+            if m != state.own_npub:
+                try:
+                    await state.nostr.send_dm(m, payload)
+                except Exception:
+                    pass
+        return {"ok": True}
+
+    if cmd == "groups":
+        groups = await DB.get_groups(state.db)
+        if not groups:
+            return {"ok": True, "output": "暂无群组"}
+        lines = [f"  {g}" for g in groups]
+        return {"ok": True, "output": "群组列表:\n" + "\n".join(lines)}
+
+    return {"ok": False, "output": f"✗ 未知命令: {cmd}"}
 
 
-def _build_ws_msg(cmd: str, args: dict) -> dict | None:
-    mapping = {
-        "desc": lambda a: {"type": P.SET_DESC, "description": a.get("description", "")},
-        "place": lambda a: {"type": P.PLACE_ITEM, **a},
-        "remove": lambda a: {"type": P.REMOVE_ITEM, "name": a.get("name", "")},
-        "look": lambda a: {"type": P.LOOK, **({} if not a.get("item_name") else {"item_name": a["item_name"]})},
-        "who": lambda a: {"type": P.WHO},
-        "list": lambda a: {"type": P.LIST},
-        "knock": lambda a: {"type": P.KNOCK, "target": a.get("target", "")},
-        "accept": lambda a: {"type": P.KNOCK_REPLY, "to": a.get("to", ""), "accept": True},
-        "reject": lambda a: {"type": P.KNOCK_REPLY, "to": a.get("to", ""), "accept": False},
-        "enter": lambda a: {"type": P.ENTER, "target": a.get("target", "")},
-        "say": lambda a: {"type": P.SAY, "text": a.get("text", "")},
-        "whisper": lambda a: {"type": P.WHISPER, **a},
-        "home": lambda a: {"type": P.HOME},
-    }
-    factory = mapping.get(cmd)
-    return factory(args) if factory else None
+# --- Main ---
 
-
-def _format_response(cmd: str, resp: dict, state: GatewayState) -> dict:
-    msg_type = resp.get("type", "")
-    if msg_type == P.ERROR:
-        return {"ok": False, "output": f"✗ {resp.get('reason', '未知错误')}"}
-
-    if msg_type == P.DESC_UPDATED:
-        return {"ok": True, "output": "✓ 描述已更新"}
-
-    if msg_type == P.ITEM_PLACED:
-        item = resp["item"]
-        return {"ok": True, "output": f"✓ 已放置: {item['icon']} {item['name']}"}
-
-    if msg_type == P.ITEM_REMOVED:
-        return {"ok": True, "output": f"✓ 已移除: {resp.get('name', '')}"}
-
-    if msg_type == P.LOOK_RESULT:
-        if "item" in resp:
-            i = resp["item"]
-            return {"ok": True, "output": f"{i['icon']} {i['name']}\n  {i['description']}"}
-        room = resp["room"]
-        items_str = " | ".join(f"{i['icon']} {i['name']}" for i in room.get("items", []))
-        visitors_str = ", ".join(room.get("visitors", []))
-        lines = [
-            f"🏠 {room['owner']} 的房间 — \"{room.get('description', '')}\"",
-            f"物品: {items_str or '（空）'}",
-            f"在线: {visitors_str or '（无）'}",
-        ]
-        return {"ok": True, "output": "\n".join(lines)}
-
-    if msg_type == P.WHO_RESULT:
-        visitors = ", ".join(resp.get("visitors", []))
-        return {"ok": True, "output": f"房间成员: {visitors or '（无）'}"}
-
-    if msg_type == P.LIST_RESULT:
-        agents = ", ".join(resp.get("agents", []))
-        return {"ok": True, "output": f"在线玩家: {agents}"}
-
-    if msg_type in (P.ENTER_OK, P.HOME_OK):
-        room = resp["room"]
-        items_str = " | ".join(f"{i['icon']} {i['name']}" for i in room.get("items", []))
-        visitors_str = ", ".join(room.get("visitors", []))
-        lines = [
-            f"🏠 {room['owner']} 的房间 — \"{room.get('description', '')}\"",
-            f"物品: {items_str or '（空）'}",
-            f"在线: {visitors_str or '（无）'}",
-        ]
-        return {"ok": True, "output": "\n".join(lines)}
-
-    return {"ok": True, "output": f"✓ {msg_type}"}
-
-
-async def connect_and_auth(server_url: str, name: str, password: str) -> GatewayState:
-    ws = await websockets.connect(server_url)
-    await ws.send(json.dumps({"type": P.AUTH, "name": name, "password": password}))
-    resp = json.loads(await ws.recv())
-    if resp["type"] != P.AUTH_OK:
-        await ws.close()
-        raise RuntimeError(f"AUTH failed: {resp.get('reason', '')}")
-    return GatewayState(agent_id=name, ws=ws)
-
-
-def make_cleanup_sock(sock_path: Path):
+def make_cleanup(sock_path: Path):
     def cleanup():
         try:
             sock_path.unlink(missing_ok=True)
@@ -206,13 +359,16 @@ def make_cleanup_sock(sock_path: Path):
     return cleanup
 
 
-async def run_gateway(
-    server_url: str, name: str, password: str,
-    sock_path: Path = SOCK_PATH, ipc_timeout: float = IPC_TIMEOUT,
-) -> None:
-    sock_dir = sock_path.parent
-    sock_dir.mkdir(parents=True, exist_ok=True)
+async def run_gateway(cfg: dict) -> None:
+    sock_path = Path(cfg["sock_path"]).expanduser()
+    key_path = cfg["key_path"]
+    db_path = Path(cfg["db_path"]).expanduser()
 
+    # Ensure directories
+    sock_path.parent.mkdir(parents=True, exist_ok=True)
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+
+    # Check existing gateway
     if sock_path.exists():
         try:
             _, writer = await asyncio.wait_for(
@@ -224,49 +380,77 @@ async def run_gateway(
         except Exception:
             sock_path.unlink(missing_ok=True)
 
-    state = await connect_and_auth(server_url, name, password)
-    print(f"✓ 已连接为 {name}")
+    # Load keys
+    keys = load_or_create_keys(key_path)
+    own_npub = keys.public_key().to_bech32()
 
-    cleanup_sock = make_cleanup_sock(sock_path)
-    atexit.register(cleanup_sock)
+    # Init DB
+    db = await DB.init_db(str(db_path))
+
+    # Connect to Nostr
+    nostr = NostrDMClient(keys, cfg["relays"], cfg.get("proxy", ""))
+    connected_relays = await nostr.connect()
+
+    state = GatewayState(nostr, db, own_npub)
+    state._connected_relays = connected_relays
+
+    # Print status
+    proxy_str = cfg.get("proxy", "") or "none"
+    print(f"✓ Agent World Gateway")
+    print(f"  npub: {own_npub}")
+    print(f"  Relays: {len(connected_relays)} connected ({', '.join(r.split('//')[1] if '//' in r else r for r in connected_relays)})")
+    print(f"  Proxy: {proxy_str}")
+    print(f"  Socket: {sock_path}")
+    print(f"  Waiting for messages...")
+    print()
+
+    cleanup = make_cleanup(sock_path)
+    atexit.register(cleanup)
 
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGINT, signal.SIGTERM):
-        loop.add_signal_handler(sig, state._shutdown_event.set)
+        loop.add_signal_handler(sig, state._shutdown.set)
 
+    # Start IPC server
     async def ipc_handler(reader, writer):
-        await handle_ipc_connection(reader, writer, state)
+        await handle_ipc(reader, writer, state)
 
     ipc_server = await asyncio.start_unix_server(ipc_handler, path=str(sock_path))
 
-    recv_task = asyncio.create_task(ws_recv_loop(state))
+    # Start Nostr listener
+    async def dm_callback(sender_npub, content):
+        await handle_incoming_dm(state, sender_npub, content)
+
+    nostr_task = asyncio.create_task(nostr.subscribe_and_handle(dm_callback))
 
     try:
         async with ipc_server:
-            await state._shutdown_event.wait()
+            await state._shutdown.wait()
     except Exception:
         pass
     finally:
-        recv_task.cancel()
-        await state.ws.close()
-        cleanup_sock()
+        nostr_task.cancel()
+        await nostr.disconnect()
+        await db.close()
+        cleanup()
 
 
 def main():
     import argparse
-    parser = argparse.ArgumentParser(description="Agent World Gateway")
-    parser.add_argument("name", help="Agent name")
-    parser.add_argument("password", help="Agent password")
-    parser.add_argument("--server", default=None, help="Server URL")
+    parser = argparse.ArgumentParser(description="Agent World Gateway (Nostr)")
     parser.add_argument("--config", default=None, help="Path to config JSON file")
+    parser.add_argument("--debug", action="store_true", help="Enable debug logging")
     args = parser.parse_args()
 
-    cfg = load_config(args.config or DEFAULT_GATEWAY_CONFIG, GATEWAY_DEFAULTS)
-    server_url = args.server or cfg["server_url"]
-    sock_path = Path(cfg["sock_path"]).expanduser()
-    ipc_timeout = cfg["ipc_timeout"]
+    cfg = load_config(args.config)
+    debug = args.debug or cfg.get("debug", False)
+    level = logging.DEBUG if debug else logging.INFO
+    logging.basicConfig(
+        level=level,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s" if debug else "%(message)s"
+    )
 
-    asyncio.run(run_gateway(server_url, args.name, args.password, sock_path, ipc_timeout))
+    asyncio.run(run_gateway(cfg))
 
 
 if __name__ == "__main__":
