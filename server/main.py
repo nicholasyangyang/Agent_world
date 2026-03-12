@@ -3,6 +3,7 @@ import json
 import logging
 import signal
 import sys
+from pathlib import Path
 from types import SimpleNamespace
 
 import websockets
@@ -10,12 +11,16 @@ import websockets
 import protocol as P
 from server import db as DB
 from server.handlers import handle_auth, dispatch, broadcast_to_room
+from config_loader import load_config, DEFAULT_SERVER_CONFIG
 
-logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-HOST = "0.0.0.0"
-PORT = 8765
+SERVER_DEFAULTS = {
+    "host": "0.0.0.0",
+    "port": 8765,
+    "db_path": "server/world.db",
+    "log_level": "INFO",
+}
 
 
 def make_state(database) -> SimpleNamespace:
@@ -58,7 +63,7 @@ async def on_connect(ws, state: SimpleNamespace) -> None:
             logger.info("Agent disconnected: %s", agent_id)
 
 
-async def create_server(database, host: str = HOST, port: int = PORT):
+async def create_server(database, host: str = "0.0.0.0", port: int = 8765):
     state = make_state(database)
 
     async def handler(ws):
@@ -68,10 +73,13 @@ async def create_server(database, host: str = HOST, port: int = PORT):
     return state, server
 
 
-async def main() -> None:
-    database = await DB.init_db()
-    state, server = await create_server(database)
-    logger.info("Server started on %s:%d", HOST, PORT)
+async def main(config_path: str | None = None) -> None:
+    cfg = load_config(config_path or DEFAULT_SERVER_CONFIG, SERVER_DEFAULTS)
+    logging.basicConfig(level=getattr(logging, cfg["log_level"].upper(), logging.INFO))
+
+    database = await DB.init_db(cfg["db_path"])
+    state, server = await create_server(database, cfg["host"], cfg["port"])
+    logger.info("Server started on %s:%d", cfg["host"], cfg["port"])
 
     loop = asyncio.get_running_loop()
     stop = loop.create_future()
@@ -90,4 +98,8 @@ async def main() -> None:
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    import argparse
+    parser = argparse.ArgumentParser(description="Agent World Server")
+    parser.add_argument("--config", default=None, help="Path to config JSON file")
+    args = parser.parse_args()
+    asyncio.run(main(args.config))

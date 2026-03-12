@@ -15,8 +15,15 @@ from types import SimpleNamespace
 import websockets
 
 import protocol as P
+from config_loader import load_config, DEFAULT_GATEWAY_CONFIG
 
 logger = logging.getLogger(__name__)
+
+GATEWAY_DEFAULTS = {
+    "server_url": "ws://127.0.0.1:8765",
+    "sock_path": "~/.agent/sock",
+    "ipc_timeout": 10.0,
+}
 
 SOCK_PATH = Path.home() / ".agent" / "sock"
 SERVER_URL_DEFAULT = "ws://127.0.0.1:8765"
@@ -190,31 +197,37 @@ async def connect_and_auth(server_url: str, name: str, password: str) -> Gateway
     return GatewayState(agent_id=name, ws=ws)
 
 
-def cleanup_sock():
-    try:
-        SOCK_PATH.unlink(missing_ok=True)
-    except Exception:
-        pass
+def make_cleanup_sock(sock_path: Path):
+    def cleanup():
+        try:
+            sock_path.unlink(missing_ok=True)
+        except Exception:
+            pass
+    return cleanup
 
 
-async def run_gateway(server_url: str, name: str, password: str) -> None:
-    sock_dir = SOCK_PATH.parent
+async def run_gateway(
+    server_url: str, name: str, password: str,
+    sock_path: Path = SOCK_PATH, ipc_timeout: float = IPC_TIMEOUT,
+) -> None:
+    sock_dir = sock_path.parent
     sock_dir.mkdir(parents=True, exist_ok=True)
 
-    if SOCK_PATH.exists():
+    if sock_path.exists():
         try:
             _, writer = await asyncio.wait_for(
-                asyncio.open_unix_connection(str(SOCK_PATH)), timeout=1.0
+                asyncio.open_unix_connection(str(sock_path)), timeout=1.0
             )
             writer.close()
             print("✗ gateway 已在运行")
             return
         except Exception:
-            SOCK_PATH.unlink(missing_ok=True)
+            sock_path.unlink(missing_ok=True)
 
     state = await connect_and_auth(server_url, name, password)
     print(f"✓ 已连接为 {name}")
 
+    cleanup_sock = make_cleanup_sock(sock_path)
     atexit.register(cleanup_sock)
 
     loop = asyncio.get_running_loop()
@@ -224,7 +237,7 @@ async def run_gateway(server_url: str, name: str, password: str) -> None:
     async def ipc_handler(reader, writer):
         await handle_ipc_connection(reader, writer, state)
 
-    ipc_server = await asyncio.start_unix_server(ipc_handler, path=str(SOCK_PATH))
+    ipc_server = await asyncio.start_unix_server(ipc_handler, path=str(sock_path))
 
     recv_task = asyncio.create_task(ws_recv_loop(state))
 
@@ -244,9 +257,16 @@ def main():
     parser = argparse.ArgumentParser(description="Agent World Gateway")
     parser.add_argument("name", help="Agent name")
     parser.add_argument("password", help="Agent password")
-    parser.add_argument("--server", default=SERVER_URL_DEFAULT, help="Server URL")
+    parser.add_argument("--server", default=None, help="Server URL")
+    parser.add_argument("--config", default=None, help="Path to config JSON file")
     args = parser.parse_args()
-    asyncio.run(run_gateway(args.server, args.name, args.password))
+
+    cfg = load_config(args.config or DEFAULT_GATEWAY_CONFIG, GATEWAY_DEFAULTS)
+    server_url = args.server or cfg["server_url"]
+    sock_path = Path(cfg["sock_path"]).expanduser()
+    ipc_timeout = cfg["ipc_timeout"]
+
+    asyncio.run(run_gateway(server_url, args.name, args.password, sock_path, ipc_timeout))
 
 
 if __name__ == "__main__":

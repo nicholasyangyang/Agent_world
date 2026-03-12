@@ -1,0 +1,6 @@
+{
+    "host": "0.0.0.0",
+    "port": 8765,
+    "db_path": "server/world.db",
+    "log_level": "INFO"
+}

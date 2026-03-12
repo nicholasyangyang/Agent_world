@@ -6,13 +6,20 @@ from pathlib import Path
 
 import click
 
-SOCK_PATH = Path.home() / ".agent" / "sock"
+from config_loader import load_config, DEFAULT_CLI_CONFIG
+
+CLI_DEFAULTS = {
+    "sock_path": "~/.agent/sock",
+}
+
+# Module-level sock path, updated by cli group callback
+_sock_path: Path = Path.home() / ".agent" / "sock"
 
 
 async def _send_ipc(cmd: str, args: dict) -> dict:
     try:
         reader, writer = await asyncio.wait_for(
-            asyncio.open_unix_connection(str(SOCK_PATH)), timeout=3.0
+            asyncio.open_unix_connection(str(_sock_path)), timeout=3.0
         )
     except Exception:
         click.echo("✗ gateway 未运行")
@@ -33,8 +40,12 @@ def send_to_gateway(cmd: str, args: dict = None) -> dict:
 
 
 @click.group()
-def cli():
+@click.option("--config", default=None, help="Path to config JSON file")
+def cli(config):
     """Agent World CLI."""
+    global _sock_path
+    cfg = load_config(config or DEFAULT_CLI_CONFIG, CLI_DEFAULTS)
+    _sock_path = Path(cfg["sock_path"]).expanduser()
 
 
 @cli.command()
@@ -46,17 +57,11 @@ def say(text):
 
 
 @cli.command()
-@click.argument("parts", nargs=-1, required=True)
-def whisper(parts):
-    """私聊。格式: whisper <target> -- <message>"""
-    raw = " ".join(parts)
-    if " -- " in raw:
-        target, text = raw.split(" -- ", 1)
-        target = target.strip()
-    else:
-        click.echo("✗ 格式: agent whisper <target> -- <message>")
-        sys.exit(1)
-    res = send_to_gateway("whisper", {"target": target, "text": text})
+@click.argument("target")
+@click.argument("text", nargs=-1, required=True)
+def whisper(target, text):
+    """私聊。格式: whisper <target> <message>"""
+    res = send_to_gateway("whisper", {"target": target, "text": " ".join(text)})
     click.echo(res["output"])
 
 
