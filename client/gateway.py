@@ -86,7 +86,8 @@ async def handle_group_message(state: GatewayState, sender_npub: str, data: dict
         if await DB.group_exists(state.db, group):
             await DB.add_member(state.db, group, from_npub)
             members = await DB.get_members(state.db, group)
-            await broadcast_members_sync(state, group, members, exclude=from_npub)
+            # Send sync to ALL members including the new joiner
+            await broadcast_members_sync(state, group, members)
             state.message_queue.append({
                 "type": "group_accept", "group": group, "from": from_npub
             })
@@ -413,13 +414,18 @@ async def run_gateway(cfg: dict) -> None:
     try:
         async with ipc_server:
             await state._shutdown.wait()
-    except Exception:
+    except (Exception, asyncio.CancelledError):
         pass
     finally:
+        print("\n✓ Gateway 正在关闭...")
         nostr_task.cancel()
-        await nostr.disconnect()
+        try:
+            await nostr.disconnect()
+        except Exception:
+            pass
         await db.close()
         cleanup()
+        print("✓ Gateway 已停止")
 
 
 def main():
@@ -437,7 +443,10 @@ def main():
         format="%(asctime)s %(levelname)s %(name)s: %(message)s" if debug else "%(message)s"
     )
 
-    asyncio.run(run_gateway(cfg))
+    try:
+        asyncio.run(run_gateway(cfg))
+    except KeyboardInterrupt:
+        pass
 
 
 if __name__ == "__main__":

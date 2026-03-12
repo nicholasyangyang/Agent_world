@@ -76,10 +76,10 @@ async def test_group_accept_broadcasts_sync(state):
     data = {"type": "group_accept", "group": "team", "from_npub": "npub1alice"}
     await handle_group_message(state, "npub1alice", data)
     await asyncio.sleep(0)  # let background task run
-    # Should sync to npub1bob (not own_npub, not npub1alice)
-    assert state.nostr.send_dm.call_count == 1
-    call_args = state.nostr.send_dm.call_args
-    assert call_args[0][0] == "npub1bob"
+    # Should sync to npub1bob AND npub1alice (not own_npub)
+    assert state.nostr.send_dm.call_count == 2
+    targets = {call[0][0] for call in state.nostr.send_dm.call_args_list}
+    assert targets == {"npub1bob", "npub1alice"}
 
 
 @pytest.mark.asyncio
