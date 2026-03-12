@@ -1,0 +1,7 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(ls /home/deeptuuk/OnlyCC/Agent_world/ 2>/dev/null && find /home/deeptuuk/OnlyCC/Agent_world -type f -name \"*.py\" 2>/dev/null | head -30)"
+    ]
+  }
+}
