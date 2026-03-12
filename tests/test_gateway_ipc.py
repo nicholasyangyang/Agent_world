@@ -1,4 +1,5 @@
 """Tests for gateway IPC command handling (mocked Nostr layer)."""
+import asyncio
 import pytest
 from unittest.mock import AsyncMock
 
@@ -74,7 +75,8 @@ async def test_rm_nonexistent_contact(state):
 async def test_msg_by_npub(state):
     res = await handle_ipc_cmd("msg", {"target": "npub1abc", "text": "hello"}, state)
     assert res["ok"] is True
-    state.nostr.send_dm.assert_awaited_once_with("npub1abc", "hello")
+    await asyncio.sleep(0)  # let background task run
+    state.nostr.send_dm.assert_called_once_with("npub1abc", "hello")
 
 
 @pytest.mark.asyncio
@@ -82,7 +84,8 @@ async def test_msg_by_nickname(state):
     await DB.add_contact(state.db, "npub1xyz", "bob")
     res = await handle_ipc_cmd("msg", {"target": "bob", "text": "hi bob"}, state)
     assert res["ok"] is True
-    state.nostr.send_dm.assert_awaited_once_with("npub1xyz", "hi bob")
+    await asyncio.sleep(0)
+    state.nostr.send_dm.assert_called_once_with("npub1xyz", "hi bob")
 
 
 @pytest.mark.asyncio
@@ -92,11 +95,12 @@ async def test_msg_unknown_target(state):
 
 
 @pytest.mark.asyncio
-async def test_msg_send_failure(state):
-    state.nostr.send_dm = AsyncMock(side_effect=Exception("network error"))
+async def test_msg_fire_and_forget(state):
+    """msg returns immediately, send_dm runs in background."""
     res = await handle_ipc_cmd("msg", {"target": "npub1abc", "text": "hi"}, state)
-    assert res["ok"] is False
-    assert "发送失败" in res["output"]
+    assert res["ok"] is True
+    # Response returned before send_dm completes
+    assert "已发送" in res["output"]
 
 
 # --- Inbox ---
@@ -157,7 +161,8 @@ async def test_group_invite(state):
     await DB.add_contact(state.db, "npub1alice", "alice")
     res = await handle_ipc_cmd("group_invite", {"group": "team", "nickname": "alice"}, state)
     assert res["ok"] is True
-    state.nostr.send_dm.assert_awaited_once()
+    await asyncio.sleep(0)
+    state.nostr.send_dm.assert_called_once()
 
 
 @pytest.mark.asyncio
@@ -179,7 +184,8 @@ async def test_group_join(state):
     res = await handle_ipc_cmd("group_join", {"npub": "npub1inviter", "group": "team"}, state)
     assert res["ok"] is True
     assert await DB.group_exists(state.db, "team")
-    state.nostr.send_dm.assert_awaited_once()
+    await asyncio.sleep(0)
+    state.nostr.send_dm.assert_called_once()
 
 
 @pytest.mark.asyncio
@@ -203,7 +209,8 @@ async def test_group_leave(state):
     res = await handle_ipc_cmd("group_leave", {"group": "team"}, state)
     assert res["ok"] is True
     assert not await DB.group_exists(state.db, "team")
-    state.nostr.send_dm.assert_awaited_once()
+    await asyncio.sleep(0)
+    state.nostr.send_dm.assert_called_once()
 
 
 @pytest.mark.asyncio
@@ -212,7 +219,8 @@ async def test_group_position(state):
     await DB.add_member(state.db, "team", "npub1alice")
     res = await handle_ipc_cmd("group_position", {"group": "team", "x": 5, "y": 3}, state)
     assert res["ok"] is True
-    state.nostr.send_dm.assert_awaited_once()
+    await asyncio.sleep(0)
+    state.nostr.send_dm.assert_called_once()
 
 
 @pytest.mark.asyncio

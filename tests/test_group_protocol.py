@@ -1,4 +1,5 @@
 """Tests for group protocol message handling (incoming NIP-17 DMs)."""
+import asyncio
 import pytest
 from unittest.mock import AsyncMock, MagicMock
 
@@ -72,8 +73,9 @@ async def test_group_accept_broadcasts_sync(state):
     await DB.add_member(state.db, "team", "npub1bob")
     data = {"type": "group_accept", "group": "team", "from_npub": "npub1alice"}
     await handle_group_message(state, "npub1alice", data)
+    await asyncio.sleep(0)  # let background task run
     # Should sync to npub1bob (not own_npub, not npub1alice)
-    assert state.nostr.send_dm.await_count == 1
+    assert state.nostr.send_dm.call_count == 1
     call_args = state.nostr.send_dm.call_args
     assert call_args[0][0] == "npub1bob"
 

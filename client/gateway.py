@@ -130,10 +130,7 @@ async def broadcast_members_sync(
     })
     for npub in members:
         if npub != exclude and npub != state.own_npub:
-            try:
-                await state.nostr.send_dm(npub, payload)
-            except Exception as e:
-                logger.warning("Failed to sync to %s: %s", npub_short(npub), e)
+            asyncio.create_task(state.nostr.send_dm(npub, payload))
 
 
 async def push_to_group_subscribers(state: GatewayState, group: str, event: dict):
@@ -218,12 +215,17 @@ async def handle_ipc_cmd(cmd: str, args: dict, state: GatewayState) -> dict:
         npub = await DB.resolve_name(state.db, target_name)
         if not npub:
             return {"ok": False, "output": f"✗ 未找到联系人: {target_name}"}
-        try:
-            await state.nostr.send_dm(npub, text)
-            display = await DB.get_display_name(state.db, npub)
-            return {"ok": True, "output": f"✓ 已发送给 {display}"}
-        except Exception as e:
-            return {"ok": False, "output": f"✗ 发送失败: {e}"}
+        display = await DB.get_display_name(state.db, npub)
+
+        async def _bg_send():
+            try:
+                await state.nostr.send_dm(npub, text)
+                logger.info("✓ DM to %s delivered", display)
+            except Exception as e:
+                logger.warning("✗ DM to %s failed: %s", display, e)
+
+        asyncio.create_task(_bg_send())
+        return {"ok": True, "output": f"✓ 已发送给 {display}"}
 
     if cmd == "contacts":
         contacts = await DB.get_contacts(state.db)
@@ -267,11 +269,8 @@ async def handle_ipc_cmd(cmd: str, args: dict, state: GatewayState) -> dict:
         payload = json.dumps({
             "type": "group_invite", "group": group, "from_npub": state.own_npub
         })
-        try:
-            await state.nostr.send_dm(npub, payload)
-            return {"ok": True, "output": f"✓ 已邀请 @{nickname} 加入 '{group}'"}
-        except Exception as e:
-            return {"ok": False, "output": f"✗ 邀请失败: {e}"}
+        asyncio.create_task(state.nostr.send_dm(npub, payload))
+        return {"ok": True, "output": f"✓ 已邀请 @{nickname} 加入 '{group}'"}
 
     if cmd == "group_join":
         inviter_npub = args.get("npub", "")
@@ -281,14 +280,11 @@ async def handle_ipc_cmd(cmd: str, args: dict, state: GatewayState) -> dict:
         payload = json.dumps({
             "type": "group_accept", "group": group, "from_npub": state.own_npub
         })
-        try:
-            await state.nostr.send_dm(inviter_npub, payload)
-            # Add self to local group
-            if not await DB.group_exists(state.db, group):
-                await DB.create_group(state.db, group, state.own_npub)
-            return {"ok": True, "output": f"✓ 已接受加入 '{group}'"}
-        except Exception as e:
-            return {"ok": False, "output": f"✗ 加入失败: {e}"}
+        asyncio.create_task(state.nostr.send_dm(inviter_npub, payload))
+        # Add self to local group
+        if not await DB.group_exists(state.db, group):
+            await DB.create_group(state.db, group, state.own_npub)
+        return {"ok": True, "output": f"✓ 已接受加入 '{group}'"}
 
     if cmd == "group_members":
         group = args.get("group", "")
@@ -312,10 +308,7 @@ async def handle_ipc_cmd(cmd: str, args: dict, state: GatewayState) -> dict:
         })
         for m in members:
             if m != state.own_npub:
-                try:
-                    await state.nostr.send_dm(m, payload)
-                except Exception:
-                    pass
+                asyncio.create_task(state.nostr.send_dm(m, payload))
         await DB.remove_member(state.db, group, state.own_npub)
         await DB.delete_group(state.db, group)
         return {"ok": True, "output": f"✓ 已离开 '{group}'"}
@@ -332,10 +325,7 @@ async def handle_ipc_cmd(cmd: str, args: dict, state: GatewayState) -> dict:
         })
         for m in members:
             if m != state.own_npub:
-                try:
-                    await state.nostr.send_dm(m, payload)
-                except Exception:
-                    pass
+                asyncio.create_task(state.nostr.send_dm(m, payload))
         return {"ok": True}
 
     if cmd == "groups":
