@@ -110,7 +110,7 @@ class NostrDMClient:
         """Send a NIP-17 encrypted DM."""
         if not self.client:
             raise RuntimeError("Not connected")
-        recipient = PublicKey.from_bech32(recipient_npub)
+        recipient = PublicKey.parse(recipient_npub)
         await self.client.send_private_msg(recipient, text)
         logger.debug("Sent DM to %s: %s", npub_short(recipient_npub), text[:50])
 
