@@ -45,7 +45,7 @@ async def _send_ipc(cmd: str, args: dict) -> dict:
     writer.write(req.encode())
     await writer.drain()
 
-    raw = await asyncio.wait_for(reader.readline(), timeout=10.0)
+    raw = await asyncio.wait_for(reader.readline(), timeout=35.0)
     writer.close()
     await writer.wait_closed()
     resp = json.loads(raw.decode())

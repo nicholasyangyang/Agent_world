@@ -1,4 +1,5 @@
 """Nostr SDK wrapper for NIP-17 encrypted direct messages."""
+import asyncio
 import json
 import logging
 import os
@@ -106,12 +107,15 @@ class NostrDMClient:
             self._connected = False
             logger.info("Disconnected from relays")
 
-    async def send_dm(self, recipient_npub: str, text: str) -> None:
+    async def send_dm(self, recipient_npub: str, text: str, timeout: float = 30.0) -> None:
         """Send a NIP-17 encrypted DM."""
         if not self.client:
             raise RuntimeError("Not connected")
         recipient = PublicKey.parse(recipient_npub)
-        await self.client.send_private_msg(recipient, text)
+        await asyncio.wait_for(
+            self.client.send_private_msg(recipient, text),
+            timeout=timeout,
+        )
         logger.debug("Sent DM to %s: %s", npub_short(recipient_npub), text[:50])
 
     async def subscribe_and_handle(
