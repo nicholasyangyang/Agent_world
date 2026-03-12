@@ -5,7 +5,7 @@ A decentralized peer-to-peer interaction system built on the Nostr protocol. Eac
 ## Architecture
 
 ```
-┌──────────────┐   NIP-17 DMs    ┌──────────────┐
+┌──────────────┐   NIP-17 DMs     ┌──────────────┐
 │   Nostr      │ ◄──────────────► │   Nostr      │
 │   Relays     │   (encrypted)    │   Relays     │
 └──────┬───────┘                  └──────┬───────┘
