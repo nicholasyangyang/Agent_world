@@ -138,10 +138,16 @@ class NostrDMClient:
         logger.info("Subscribed to NIP-17 DMs")
 
         signer = NostrSigner.keys(self.keys)
+        own_pubkey = self.keys.public_key()
 
         class NotificationHandler(HandleNotification):
             async def handle(self, relay_url, subscription_id, event: Event):
                 if event.kind().as_u16() == 1059:
+                    # Pre-filter: check p tag before attempting decryption
+                    tagged_pks = event.tags().public_keys()
+                    if tagged_pks and own_pubkey not in tagged_pks:
+                        logger.debug("Skipped gift wrap: p tag not for us")
+                        return
                     try:
                         unwrapped = await UnwrappedGift.from_gift_wrap(signer, event)
                         sender_pubkey = unwrapped.sender()
@@ -154,8 +160,6 @@ class NostrDMClient:
                         )
                         await on_dm(sender_npub, content)
                     except Exception as e:
-                        # Silently ignore events we can't decrypt
-                        # (not addressed to us, or from incompatible clients)
                         logger.debug("Ignored gift wrap: %s", e)
 
             async def handle_msg(self, relay_url, msg):
