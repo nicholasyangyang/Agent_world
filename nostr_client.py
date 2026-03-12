@@ -70,7 +70,14 @@ class NostrDMClient:
         """Connect to relays. Returns list of connected relay URLs."""
         opts = ClientOptions()
         if self.proxy:
-            conn = Connection().mode(ConnectionMode.PROXY).addr(self.proxy)
+            # Parse proxy address "host:port"
+            if ":" in self.proxy:
+                host, port_str = self.proxy.rsplit(":", 1)
+                port = int(port_str)
+            else:
+                host, port = self.proxy, 1080
+            mode = ConnectionMode.PROXY(host, port)
+            conn = Connection().mode(mode)
             opts = opts.connection(conn)
 
         signer = NostrSigner.keys(self.keys)
