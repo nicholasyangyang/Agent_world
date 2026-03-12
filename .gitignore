@@ -1,0 +1,4 @@
+__pycache__
+.cladue
+.pytest_cache
+world.db

@@ -93,7 +93,6 @@ async def test_cannot_modify_others_room(server, client):
     await recv_type(bob, "KNOCK_ACCEPTED")
     resp = await send(bob, {"type": "ENTER", "target": "alice"})
     assert resp["type"] == "ENTER_OK"
-    assert resp["type"] == "ENTER_OK"
     resp = await send(bob, {"type": "PLACE_ITEM", "icon": "🎸", "name": "吉他", "description": ""})
     assert resp["type"] == "ERROR"
     resp = await send(bob, {"type": "REMOVE_ITEM", "name": "something"})

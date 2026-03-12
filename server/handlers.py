@@ -248,7 +248,9 @@ async def handle_home(ws, msg: dict, agent_id: str, state: SimpleNamespace) -> N
         )
     room_data = await DB.get_room(state.db, agent_id)
     room_data["owner"] = agent_id
-    room_data["visitors"] = []
+    room_data["visitors"] = [
+        aid for aid, loc in state.locations.items() if loc == agent_id
+    ]
     await send_msg(ws, {"type": P.HOME_OK, "room": room_data})
 
 

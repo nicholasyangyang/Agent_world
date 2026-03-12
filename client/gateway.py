@@ -30,6 +30,7 @@ class GatewayState:
         self.message_queue: list[dict] = []
         self.pending_response: asyncio.Queue = asyncio.Queue()
         self.current_room: str | None = None
+        self._shutdown_event: asyncio.Event = asyncio.Event()
 
 
 async def ws_recv_loop(state: GatewayState) -> None:
@@ -82,7 +83,7 @@ async def handle_ipc_cmd(cmd: str, args: dict, state: GatewayState) -> dict:
         return {"ok": True, "output": f"✓ {state.agent_id} @ {room}"}
 
     if cmd == "stop":
-        asyncio.get_event_loop().call_soon(asyncio.get_event_loop().stop)
+        state._shutdown_event.set()
         return {"ok": True, "output": "✓ gateway 正在停止"}
 
     ws_msg = _build_ws_msg(cmd, args)
@@ -94,7 +95,7 @@ async def handle_ipc_cmd(cmd: str, args: dict, state: GatewayState) -> dict:
     except Exception as e:
         return {"ok": False, "output": f"✗ 发送失败: {e}"}
 
-    if cmd in ("say", "whisper", "knock_reply"):
+    if cmd in ("say", "whisper", "accept", "reject"):
         return {"ok": True, "output": "✓ 已发送"}
 
     if cmd == "knock":
@@ -216,8 +217,9 @@ async def run_gateway(server_url: str, name: str, password: str) -> None:
 
     atexit.register(cleanup_sock)
 
+    loop = asyncio.get_running_loop()
     for sig in (signal.SIGINT, signal.SIGTERM):
-        asyncio.get_event_loop().add_signal_handler(sig, cleanup_sock)
+        loop.add_signal_handler(sig, state._shutdown_event.set)
 
     async def ipc_handler(reader, writer):
         await handle_ipc_connection(reader, writer, state)
@@ -228,7 +230,7 @@ async def run_gateway(server_url: str, name: str, password: str) -> None:
 
     try:
         async with ipc_server:
-            await ipc_server.serve_forever()
+            await state._shutdown_event.wait()
     except Exception:
         pass
     finally:
