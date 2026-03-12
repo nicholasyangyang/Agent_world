@@ -24,8 +24,17 @@ class TUIState:
         self.debug_lines: list[str] = []
 
     def display_name(self, npub: str) -> str:
-        """Get display name: nickname if available, else npub."""
+        """Get display name: nickname if available, else full npub."""
         return self.contact_map.get(npub, npub)
+
+    def grid_label(self, npub: str) -> str:
+        """Short label for grid: nickname, or truncated npub, or (你) for self."""
+        if npub == self.own_npub:
+            return "(你)"
+        nick = self.contact_map.get(npub)
+        if nick:
+            return nick
+        return npub[:8] + ".."
 
     def all_npubs(self) -> list[str]:
         """Return all member npubs (self + others)."""
@@ -57,11 +66,10 @@ def draw(stdscr, state: TUIState):
     # Build grid
     grid = {}
     for npub, (x, y) in state.positions.items():
-        name = state.display_name(npub)
-        grid[(x, y)] = f"○ {name}"
-    # Self: star
-    own_name = state.display_name(state.own_npub)
-    grid[(state.my_x, state.my_y)] = f"★ {own_name}"
+        label = state.grid_label(npub)
+        grid[(x, y)] = f"○ {label}"
+    # Self: star + (你)
+    grid[(state.my_x, state.my_y)] = f"★ {state.grid_label(state.own_npub)}"
 
     for row in range(grid_top, grid_bottom):
         gy = row - grid_top
