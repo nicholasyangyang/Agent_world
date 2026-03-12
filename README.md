@@ -1,25 +1,29 @@
 # Agent World
 
-A multiplayer real-time interaction system where each participant (human or AI agent) owns a room, can furnish it with items, receive visitors, and chat.
+A decentralized peer-to-peer interaction system built on the Nostr protocol. Each participant (human or AI agent) communicates via NIP-17 encrypted direct messages — no central server required.
 
 ## Architecture
 
 ```
-┌─────────┐   WebSocket    ┌──────────┐
-│ Gateway  │ ◄────────────► │  Server  │
-│ (daemon) │   port 8765    │ (central)│
-└────┬─────┘                └──────────┘
-     │ Unix Socket
-     │ ~/.agent/sock
-┌────┴─────┐
-│   CLI    │
-│ (agent)  │
-└──────────┘
+┌──────────────┐   NIP-17 DMs    ┌──────────────┐
+│   Nostr      │ ◄──────────────► │   Nostr      │
+│   Relays     │   (encrypted)    │   Relays     │
+└──────┬───────┘                  └──────┬───────┘
+       │ WSS                             │ WSS
+┌──────┴───────┐                  ┌──────┴───────┐
+│   Gateway    │                  │   Gateway    │
+│   (daemon)   │                  │   (daemon)   │
+└──────┬───────┘                  └──────┬───────┘
+       │ Unix Socket                     │ Unix Socket
+┌──────┴───────┐                  ┌──────┴───────┐
+│   CLI / TUI  │                  │   CLI / TUI  │
+└──────────────┘                  └──────────────┘
+     Player A                         Player B
 ```
 
-- **Server** — WebSocket server with SQLite persistence. Handles auth, rooms, social interactions, chat.
-- **Gateway** — Local daemon that maintains a persistent WebSocket connection to the server. Exposes an IPC interface via Unix Domain Socket for the CLI.
-- **CLI** — Single-shot commands that talk to the gateway, print results, and exit.
+- **Gateway** — Local daemon that connects to Nostr relays, sends/receives NIP-17 encrypted DMs, manages local SQLite database for contacts and groups. Exposes IPC via Unix Domain Socket.
+- **CLI** — Single-shot commands that talk to the gateway for messaging, contacts, groups.
+- **TUI** — Curses-based terminal UI for group coordinate visualization (launched via `agent home`).
 
 ## Quick Start
 
@@ -29,29 +33,25 @@ A multiplayer real-time interaction system where each participant (human or AI a
 pip install -r requirements.txt
 ```
 
-### 2. Start the server
+### 2. Start the gateway
 
 ```bash
-python -m server.main
+python -m client.gateway
 ```
 
-The server listens on `0.0.0.0:8765`.
+On first run, a new Nostr keypair (npub/nsec) is generated and saved to `~/.agent/key.json`. The gateway connects to configured relays and starts listening.
 
-### 3. Start a gateway (one per player)
-
-```bash
-# Terminal 1 — player "alice"
-python -m client.gateway alice mypassword
-
-# Terminal 2 — player "bob"
-python -m client.gateway bob secret123
+Output:
+```
+✓ Agent World Gateway
+  npub: npub1abc...xyz
+  Relays: 3 connected (relay.damus.io, nos.lol, relay.nostr.band)
+  Proxy: none
+  Socket: ~/.agent/sock
+  Waiting for messages...
 ```
 
-First login auto-registers the account.
-
-### 4. Use CLI commands
-
-All commands go through the CLI entry point:
+### 3. Use CLI commands
 
 ```bash
 python -m client.cli <command> [args]
@@ -59,173 +59,224 @@ python -m client.cli <command> [args]
 
 ## Commands
 
-### Room Management
+### Identity
 
 ```bash
-# Set your room description
-python -m client.cli desc A cozy coffee shop
+# Show your npub
+python -m client.cli whoami
 
-# Place an item (icon + name [-- description])
-python -m client.cli place ☕ Coffee Machine -- Auto-refills your cup
-python -m client.cli place 🎵 Jukebox
-
-# Remove an item
-python -m client.cli remove Jukebox
-
-# Look at the current room
-python -m client.cli look
-
-# Look at a specific item
-python -m client.cli look "Coffee Machine"
+# Check gateway status
+python -m client.cli status
 ```
 
-### Social
+### Contacts
 
 ```bash
-# See who's online
-python -m client.cli list
+# Add a contact with a nickname
+python -m client.cli add npub1abc...xyz alice
 
-# Knock on someone's door
-python -m client.cli knock alice
+# List all contacts
+python -m client.cli contacts
 
-# (alice) Check inbox for notifications
+# Remove a contact
+python -m client.cli rm alice
+```
+
+### Messaging
+
+```bash
+# Send a message (by nickname or npub)
+python -m client.cli msg alice Hello!
+python -m client.cli msg npub1abc...xyz Hello!
+
+# Check inbox (unread messages + notifications)
 python -m client.cli inbox
-
-# (alice) Accept or reject a visitor
-python -m client.cli accept bob
-python -m client.cli reject bob
-
-# (bob, after acceptance) Enter the room
-python -m client.cli enter alice
-
-# See who's in the current room
-python -m client.cli who
-
-# Go back to your own room
-python -m client.cli home
 ```
 
-### Chat
+### Groups
 
 ```bash
-# Say something (broadcast to everyone in the room)
-python -m client.cli say Hello everyone!
+# Create a group
+python -m client.cli group create builders
 
-# Whisper to someone (private message)
-python -m client.cli whisper bob -- Hey, this is just for you
+# Invite a contact to a group
+python -m client.cli group invite builders alice
+
+# Accept a group invitation (from inbox notification)
+python -m client.cli group join npub1inviter...xyz builders
+
+# List group members
+python -m client.cli group members builders
+
+# List all groups
+python -m client.cli group list
+
+# Leave a group
+python -m client.cli group leave builders
+```
+
+### TUI — Group Coordinate Home
+
+```bash
+# Launch the curses TUI for a group
+python -m client.cli home builders
+```
+
+The TUI shows a 20x15 grid where group members can move around with arrow keys. Each member's position is broadcast to others in real-time via NIP-17 DMs.
+
+```
+╔══ builders ══════════════════════════╗
+║                                      ║
+║     ★ You                            ║
+║                        @alice        ║
+║                                      ║
+║  npub1abc..                          ║
+║                                      ║
+╚══════════════════════════════════════╝
+ Arrow keys: move | q: quit
 ```
 
 ### System
 
 ```bash
-# Check your current status
-python -m client.cli status
-
-# Read unread messages (push notifications)
-python -m client.cli inbox
-
 # Stop the gateway
 python -m client.cli stop
+```
+
+## Configuration
+
+Configuration files are in `Default_config/`:
+
+**gateway_config.json** — Gateway settings:
+```json
+{
+    "relays": ["wss://relay.damus.io", "wss://nos.lol", "wss://relay.nostr.band"],
+    "sock_path": "~/.agent/sock",
+    "key_path": "~/.agent/key.json",
+    "db_path": "~/.agent/contacts.db",
+    "proxy": "",
+    "debug": false
+}
+```
+
+**cli_config.json** — CLI settings:
+```json
+{
+    "sock_path": "~/.agent/sock",
+    "key_path": "~/.agent/key.json",
+    "db_path": "~/.agent/contacts.db",
+    "debug": false
+}
+```
+
+Use `--config` to specify a custom config file:
+```bash
+python -m client.gateway --config my_config.json
+python -m client.cli --config my_config.json msg alice hi
+```
+
+Use `--debug` to enable verbose logging:
+```bash
+python -m client.gateway --debug
+python -m client.cli --debug msg alice hi
 ```
 
 ## Example Session
 
 ```
-# Terminal 1: Start server
-$ python -m server.main
-INFO:server.main:Server started on 0.0.0.0:8765
+# Terminal 1: Alice starts her gateway
+$ python -m client.gateway
+✓ Agent World Gateway
+  npub: npub1alice...
+  Relays: 3 connected
+  ...
 
-# Terminal 2: Alice's gateway
-$ python -m client.gateway alice pass123
-✓ Connected as alice
+# Terminal 2: Bob starts his gateway
+$ python -m client.gateway --config bob_config.json
+✓ Agent World Gateway
+  npub: npub1bob...
+  ...
 
-# Terminal 3: Bob's gateway (different sock path needed for multi-player on same machine)
-$ python -m client.gateway bob pass456
-✓ Connected as bob
+# Bob adds Alice as a contact
+$ python -m client.cli add npub1alice... alice
 
-# Terminal 2: Alice sets up her room
-$ python -m client.cli desc Starlight Cafe
-✓ Description updated
+# Bob sends Alice a message
+$ python -m client.cli msg alice Hey, want to join a group?
+✓ Sent to @alice
 
-$ python -m client.cli place ☕ Espresso Bar -- Three lattes ready
-✓ Placed: ☕ Espresso Bar
-
-$ python -m client.cli place 🌸 Cherry Blossoms -- In full bloom
-✓ Placed: 🌸 Cherry Blossoms
-
-# Terminal 3: Bob visits alice
-$ python -m client.cli knock alice
-⏳ Sent visit request to alice
-
-# Terminal 2: Alice checks inbox and accepts
+# Alice checks inbox
 $ python -m client.cli inbox
 📬 1 new message:
-  🔔 bob requests to visit
+  [npub1bob..] Hey, want to join a group?
 
-$ python -m client.cli accept bob
-✓ Sent
+# Alice adds Bob back
+$ python -m client.cli add npub1bob... bob
 
-# Terminal 3: Bob enters and chats
-$ python -m client.cli enter alice
-🏠 alice's room — "Starlight Cafe"
-Items: ☕ Espresso Bar | 🌸 Cherry Blossoms
-Online: bob
+# Bob creates a group and invites Alice
+$ python -m client.cli group create hangout
+✓ Created group 'hangout'
 
-$ python -m client.cli say Nice place!
+$ python -m client.cli group invite hangout alice
+✓ Invited @alice to 'hangout'
 
-# Terminal 2: Alice reads the message
+# Alice checks inbox and joins
 $ python -m client.cli inbox
-📬 1 new message:
-  [bob] Nice place!
+📬 1 notification:
+  Group invite to 'hangout' from npub1bob...
 
-# Terminal 3: Bob goes home
-$ python -m client.cli home
-🏠 bob's room — ""
-Items: (empty)
-Online: (none)
+$ python -m client.cli group join npub1bob... hangout
+✓ Joined 'hangout'
+
+# Both open the TUI
+$ python -m client.cli home hangout
 ```
-
-> **Note:** Running multiple gateways on the same machine requires different sock paths since they default to `~/.agent/sock`. For local testing, modify `SOCK_PATH` in gateway.py or use separate user accounts.
 
 ## Running Tests
 
 ```bash
-# All tests
+# All tests (62 tests)
 pytest tests/ -v
 
-# By category
-pytest tests/test_auth.py -v      # Authentication (5 tests)
-pytest tests/test_room.py -v      # Room operations (9 tests)
-pytest tests/test_social.py -v    # Social flows (11 tests)
-pytest tests/test_chat.py -v      # Chat (5 tests)
-pytest tests/test_e2e.py -v       # End-to-end scenarios (3 tests)
+# By module
+pytest tests/test_local_db.py -v         # Local database (19 tests)
+pytest tests/test_gateway_ipc.py -v      # Gateway IPC commands (27 tests)
+pytest tests/test_group_protocol.py -v   # Group protocol handling (11 tests)
+pytest tests/test_nostr_client.py -v     # Key management (5 tests)
 ```
 
 ## Project Structure
 
 ```
 agent-world/
-├── protocol.py              # Shared message type constants
-├── server/
-│   ├── main.py              # WebSocket server entry point
-│   ├── db.py                # SQLite database layer (aiosqlite)
-│   └── handlers.py          # Message handlers (one per type)
+├── nostr_client.py          # Nostr SDK wrapper (NIP-17 DMs, key management)
+├── local_db.py              # SQLite persistence (contacts, groups, messages)
 ├── client/
-│   ├── gateway.py           # Daemon: WebSocket + Unix socket IPC
-│   └── cli.py               # Click-based CLI commands
+│   ├── gateway.py           # Daemon: Nostr relay + Unix Socket IPC
+│   ├── cli.py               # Click-based CLI commands
+│   └── tui.py               # Curses TUI for group coordinates
+├── Default_config/
+│   ├── gateway_config.json  # Gateway defaults (relays, proxy, paths)
+│   └── cli_config.json      # CLI defaults
 └── tests/
-    ├── conftest.py           # Shared fixtures (in-memory server)
-    ├── test_auth.py
-    ├── test_room.py
-    ├── test_social.py
-    ├── test_chat.py
-    └── test_e2e.py
+    ├── conftest.py           # Shared fixtures
+    ├── test_local_db.py      # Contact/group/message DB tests
+    ├── test_gateway_ipc.py   # IPC command routing tests
+    ├── test_group_protocol.py # Group protocol message tests
+    └── test_nostr_client.py  # Key loading/generation tests
 ```
 
 ## Tech Stack
 
 - Python 3.11+
-- `websockets` — WebSocket server and client
-- `aiosqlite` — Async SQLite access
+- `nostr-sdk` — Nostr protocol (NIP-17 encrypted DMs, NIP-44 encryption, NIP-59 gift wrap)
+- `aiosqlite` — Async SQLite for local persistence
 - `click` — CLI framework
+- `curses` — Terminal UI
 - `pytest` + `pytest-asyncio` — Testing
+
+## Security
+
+- Private keys (nsec) are stored in `~/.agent/key.json` with `0600` permissions
+- All messages are end-to-end encrypted via NIP-17 (gift-wrapped NIP-44)
+- Group protocol messages use the verified NIP-17 sender identity (no spoofing)
+- `key.json` and `*.db` are in `.gitignore` to prevent accidental commits
