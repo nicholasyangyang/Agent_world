@@ -1,8 +1,10 @@
 {
     "relays": [
         "wss://relay.damus.io",
-        "wss://nos.lol",
-        "wss://relay.nostr.band"
+        "wss://relay.0xchat.com",
+        "wss://nostr.oxtr.dev",
+        "wss://nostr-pub.wellorder.net",
+        "wss://relay.primal.net"
     ],
     "sock_path": "~/.agent/sock",
     "key_path": "~/.agent/key.json",
