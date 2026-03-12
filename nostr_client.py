@@ -154,7 +154,9 @@ class NostrDMClient:
                         )
                         await on_dm(sender_npub, content)
                     except Exception as e:
-                        logger.error("Failed to unwrap gift: %s", e)
+                        # Silently ignore events we can't decrypt
+                        # (not addressed to us, or from incompatible clients)
+                        logger.debug("Ignored gift wrap: %s", e)
 
             async def handle_msg(self, relay_url, msg):
                 pass
