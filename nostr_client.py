@@ -127,16 +127,16 @@ class NostrDMClient:
 
         # Subscribe to gift wrap events (kind 1059) addressed to us
         f = Filter().pubkey(self.keys.public_key()).kind(Kind(1059))
-        await self.client.subscribe([f], None)
+        await self.client.subscribe(f)
         logger.info("Subscribed to NIP-17 DMs")
 
-        keys = self.keys
+        signer = NostrSigner.keys(self.keys)
 
         class NotificationHandler(HandleNotification):
             async def handle(self, relay_url, subscription_id, event: Event):
                 if event.kind().as_u16() == 1059:
                     try:
-                        unwrapped = UnwrappedGift.from_gift_wrap(keys, event)
+                        unwrapped = await UnwrappedGift.from_gift_wrap(signer, event)
                         sender_pubkey = unwrapped.sender()
                         rumor = unwrapped.rumor()
                         sender_npub = sender_pubkey.to_bech32()
