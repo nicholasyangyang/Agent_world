@@ -7,7 +7,7 @@ from typing import Optional, Callable, Awaitable
 
 from nostr_sdk import (
     Client, ClientBuilder, ClientOptions, Connection, ConnectionMode,
-    Keys, PublicKey, SecretKey, Filter, Kind, NostrSigner,
+    Keys, PublicKey, SecretKey, Filter, Kind, NostrSigner, RelayUrl,
     HandleNotification, RelayMessage, Event, UnwrappedGift,
     Tag,
 )
@@ -86,7 +86,7 @@ class NostrDMClient:
 
         for relay_url in self.relays:
             try:
-                await self.client.add_relay(relay_url)
+                await self.client.add_relay(RelayUrl.parse(relay_url))
                 logger.debug("Added relay: %s", relay_url)
             except Exception as e:
                 logger.warning("Failed to add relay %s: %s", relay_url, e)
