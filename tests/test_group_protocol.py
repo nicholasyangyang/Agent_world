@@ -24,24 +24,26 @@ async def state():
 async def test_incoming_plain_dm(state):
     await handle_incoming_dm(state, "npub1abc", "hello world")
     assert state._msg_count == 1
-    assert len(state.message_queue) == 1
-    assert state.message_queue[0]["type"] == "dm"
-    assert state.message_queue[0]["text"] == "hello world"
+    # DMs go to DB only, not message_queue
+    assert len(state.message_queue) == 0
     unread = await DB.get_unread(state.db)
     assert len(unread) == 1
+    assert unread[0]["text"] == "hello world"
 
 
 @pytest.mark.asyncio
 async def test_incoming_invalid_json_treated_as_dm(state):
     await handle_incoming_dm(state, "npub1abc", "{bad json")
     assert state._msg_count == 1
-    assert state.message_queue[0]["type"] == "dm"
+    unread = await DB.get_unread(state.db)
+    assert len(unread) == 1
 
 
 @pytest.mark.asyncio
 async def test_incoming_json_without_type_treated_as_dm(state):
     await handle_incoming_dm(state, "npub1abc", '{"data": 123}')
-    assert state.message_queue[0]["type"] == "dm"
+    unread = await DB.get_unread(state.db)
+    assert len(unread) == 1
 
 
 # --- Group invite ---

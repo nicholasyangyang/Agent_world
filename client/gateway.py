@@ -62,12 +62,9 @@ async def handle_incoming_dm(state: GatewayState, sender_npub: str, content: str
     except (json.JSONDecodeError, KeyError):
         pass
 
-    # Plain text DM
+    # Plain text DM — save to DB only (inbox reads from DB)
     display = await DB.get_display_name(state.db, sender_npub)
     await DB.save_message(state.db, sender_npub, content)
-    state.message_queue.append({
-        "type": "dm", "from": sender_npub, "text": content
-    })
     logger.info("📩 DM from %s: %s", display, content[:80])
 
 

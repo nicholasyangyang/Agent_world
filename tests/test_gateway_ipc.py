@@ -116,7 +116,7 @@ async def test_inbox_empty(state):
 @pytest.mark.asyncio
 async def test_inbox_with_messages(state):
     await DB.save_message(state.db, "npub1abc", "hello")
-    state.message_queue.append({"type": "dm", "from": "npub1abc", "text": "hello"})
+    state.message_queue.append({"type": "group_invite", "group": "team", "from": "npub1abc"})
     res = await handle_ipc_cmd("inbox", {}, state)
     assert len(res["messages"]) == 1
     assert len(res["notifications"]) == 1
