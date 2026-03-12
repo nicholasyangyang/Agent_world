@@ -7,7 +7,7 @@ from typing import Optional, Callable, Awaitable
 
 from nostr_sdk import (
     Client, ClientBuilder, ClientOptions, Connection, ConnectionMode,
-    Keys, PublicKey, SecretKey, Filter, Kind,
+    Keys, PublicKey, SecretKey, Filter, Kind, NostrSigner,
     HandleNotification, RelayMessage, Event, UnwrappedGift,
     Tag,
 )
@@ -73,7 +73,8 @@ class NostrDMClient:
             conn = Connection().mode(ConnectionMode.PROXY).addr(self.proxy)
             opts = opts.connection(conn)
 
-        builder = ClientBuilder().signer(self.keys).opts(opts)
+        signer = NostrSigner.keys(self.keys)
+        builder = ClientBuilder().signer(signer).opts(opts)
         self.client = builder.build()
 
         for relay_url in self.relays:
