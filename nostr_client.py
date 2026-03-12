@@ -44,6 +44,19 @@ def npub_short(npub: str) -> str:
     return npub[:12] + ".."
 
 
+import re
+_BASE64_PATTERN = re.compile(r'^[A-Za-z0-9+/]{64,}={0,2}$')
+
+
+def _looks_like_ciphertext(text: str) -> bool:
+    """Detect base64-encoded ciphertext that wasn't properly decrypted."""
+    if len(text) < 64:
+        return False
+    if '\n' in text or ' ' in text:
+        return False
+    return bool(_BASE64_PATTERN.match(text))
+
+
 class NostrDMClient:
     """High-level wrapper for Nostr NIP-17 encrypted DMs."""
 
@@ -139,10 +152,20 @@ class NostrDMClient:
 
         signer = NostrSigner.keys(self.keys)
         own_pubkey = self.keys.public_key()
+        seen_ids: set[str] = set()
 
         class NotificationHandler(HandleNotification):
             async def handle(self, relay_url, subscription_id, event: Event):
                 if event.kind().as_u16() == 1059:
+                    # Dedup: same event from multiple relays
+                    event_id = event.id().to_hex()
+                    if event_id in seen_ids:
+                        return
+                    seen_ids.add(event_id)
+                    # Cap seen_ids to prevent unbounded growth
+                    if len(seen_ids) > 10000:
+                        seen_ids.clear()
+
                     # Pre-filter: check p tag before attempting decryption
                     tagged_pks = event.tags().public_keys()
                     if tagged_pks and own_pubkey not in tagged_pks:
@@ -154,6 +177,10 @@ class NostrDMClient:
                         rumor = unwrapped.rumor()
                         sender_npub = sender_pubkey.to_bech32()
                         content = rumor.content()
+                        # Skip garbled content (failed decryption that didn't throw)
+                        if _looks_like_ciphertext(content):
+                            logger.debug("Skipped garbled content from %s", npub_short(sender_npub))
+                            return
                         logger.debug(
                             "Received DM from %s: %s",
                             npub_short(sender_npub), content[:50]
