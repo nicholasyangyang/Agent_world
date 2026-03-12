@@ -8,11 +8,11 @@ from client.gateway import GatewayState, handle_incoming_dm, handle_group_messag
 
 @pytest.fixture
 async def state():
+    """Override shared fixture — group protocol tests use npub1me as own_npub."""
     db = await DB.init_db(":memory:")
     nostr = MagicMock()
     nostr.send_dm = AsyncMock()
-    own_npub = "npub1me"
-    s = GatewayState(nostr, db, own_npub)
+    s = GatewayState(nostr, db, "npub1me")
     yield s
     await db.close()
 

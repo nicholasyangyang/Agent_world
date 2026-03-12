@@ -1,22 +1,9 @@
 """Tests for gateway IPC command handling (mocked Nostr layer)."""
 import pytest
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock
 
 import local_db as DB
-from client.gateway import GatewayState, handle_ipc_cmd
-
-
-@pytest.fixture
-async def state():
-    """GatewayState with in-memory DB and mocked Nostr client."""
-    db = await DB.init_db(":memory:")
-    nostr = MagicMock()
-    nostr.send_dm = AsyncMock()
-    own_npub = "npub1ownkey123456789"
-    s = GatewayState(nostr, db, own_npub)
-    s._connected_relays = ["wss://relay.test"]
-    yield s
-    await db.close()
+from client.gateway import handle_ipc_cmd
 
 
 # --- Basic commands ---

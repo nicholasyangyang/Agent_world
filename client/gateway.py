@@ -75,7 +75,7 @@ async def handle_group_message(state: GatewayState, sender_npub: str, data: dict
     """Handle group protocol messages."""
     msg_type = data.get("type")
     group = data.get("group", "")
-    from_npub = data.get("from_npub", sender_npub)
+    from_npub = sender_npub  # Always use verified NIP-17 sender, ignore payload
     display = await DB.get_display_name(state.db, from_npub)
 
     if msg_type == "group_invite":

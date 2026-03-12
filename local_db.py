@@ -6,6 +6,7 @@ from typing import Optional
 async def init_db(path: str = "contacts.db") -> aiosqlite.Connection:
     db = await aiosqlite.connect(path)
     db.row_factory = aiosqlite.Row
+    await db.execute("PRAGMA foreign_keys = ON")
     await db.executescript("""
         CREATE TABLE IF NOT EXISTS contacts (
             npub TEXT PRIMARY KEY,

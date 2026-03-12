@@ -3,13 +3,6 @@ import pytest
 import local_db as DB
 
 
-@pytest.fixture
-async def db():
-    conn = await DB.init_db(":memory:")
-    yield conn
-    await conn.close()
-
-
 # --- Contacts ---
 
 @pytest.mark.asyncio

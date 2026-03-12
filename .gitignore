@@ -1,4 +1,7 @@
-__pycache__
-.cladue
+__pycache__/
+.claude
 .pytest_cache
 world.db
+key.json
+contacts.db
+*.db

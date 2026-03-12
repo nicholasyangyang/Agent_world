@@ -1,6 +1,7 @@
 """Nostr SDK wrapper for NIP-17 encrypted direct messages."""
 import json
 import logging
+import os
 from pathlib import Path
 from typing import Optional, Callable, Awaitable
 
@@ -26,10 +27,13 @@ def load_or_create_keys(key_path: str | Path) -> Keys:
 
     keys = Keys.generate()
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps({
+    content = json.dumps({
         "nsec": keys.secret_key().to_bech32(),
         "npub": keys.public_key().to_bech32(),
-    }, indent=2))
+    }, indent=2)
+    fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as f:
+        f.write(content)
     logger.info("Generated new keys, saved to %s", path)
     return keys
 
