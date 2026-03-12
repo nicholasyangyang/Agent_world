@@ -8,7 +8,7 @@ from typing import Optional, Callable, Awaitable
 
 from nostr_sdk import (
     Client, ClientBuilder, ClientOptions, Connection, ConnectionMode,
-    Keys, PublicKey, SecretKey, Filter, Kind, NostrSigner, RelayUrl,
+    Keys, PublicKey, SecretKey, Filter, Kind, NostrSigner, RelayUrl, Timestamp,
     HandleNotification, RelayMessage, Event, UnwrappedGift,
     Tag,
 )
@@ -130,7 +130,10 @@ class NostrDMClient:
             raise RuntimeError("Not connected")
 
         # Subscribe to gift wrap events (kind 1059) addressed to us
-        f = Filter().pubkey(self.keys.public_key()).kind(Kind(1059))
+        # since=7 days ago, limit=0 → only receive new online messages
+        import time
+        since = Timestamp.from_secs(int(time.time()) - 7 * 86400)
+        f = Filter().pubkey(self.keys.public_key()).kind(Kind(1059)).since(since).limit(0)
         await self.client.subscribe(f)
         logger.info("Subscribed to NIP-17 DMs")
 
