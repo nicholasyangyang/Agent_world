@@ -19,8 +19,21 @@ class TUIState:
         self.my_x = GRID_W // 2
         self.my_y = GRID_H // 2
         self.positions: dict[str, tuple[int, int]] = {}  # npub -> (x, y)
-        self.names: dict[str, str] = {}  # npub -> display name
+        self.names: dict[str, str] = {}  # npub -> display name (nickname or npub)
+        self.contact_map: dict[str, str] = {}  # npub -> nickname
         self.debug_lines: list[str] = []
+
+    def display_name(self, npub: str) -> str:
+        """Get display name: nickname if available, else npub."""
+        return self.contact_map.get(npub, npub)
+
+    def all_npubs(self) -> list[str]:
+        """Return all member npubs (self + others)."""
+        npubs = [self.own_npub]
+        for npub in self.positions:
+            if npub != self.own_npub:
+                npubs.append(npub)
+        return npubs
 
 
 def draw(stdscr, state: TUIState):
@@ -32,23 +45,29 @@ def draw(stdscr, state: TUIState):
     title = f" 🏠 {state.group} "
     stdscr.addstr(0, 0, "┌" + title + "─" * max(0, w - len(title) - 2) + "┐")
 
+    # Reserve space for member list at bottom
+    all_npubs = state.all_npubs()
+    member_lines_needed = len(all_npubs) + 2  # header + separator + each member
+
     # Grid area
     grid_top = 1
-    grid_bottom = min(grid_top + GRID_H + 1, h - 4)
+    grid_bottom = min(grid_top + GRID_H + 1, h - member_lines_needed - 5)
+    grid_bottom = max(grid_top + 3, grid_bottom)  # at least 3 rows
 
     # Build grid
     grid = {}
     for npub, (x, y) in state.positions.items():
-        name = state.names.get(npub, npub[:10] + "..")
-        grid[(x, y)] = name
-    grid[(state.my_x, state.my_y)] = "★ You"
+        name = state.display_name(npub)
+        grid[(x, y)] = f"○ {name}"
+    # Self: star
+    own_name = state.display_name(state.own_npub)
+    grid[(state.my_x, state.my_y)] = f"★ {own_name}"
 
     for row in range(grid_top, grid_bottom):
         gy = row - grid_top
         line = "│"
-        col = 1
-        placed = {}
         # Find entities on this row
+        placed = {}
         for (ex, ey), name in grid.items():
             if ey == gy:
                 placed[ex] = name
@@ -78,16 +97,52 @@ def draw(stdscr, state: TUIState):
     separator = "├" + "─" * (w - 2) + "┤"
     bottom = "└" + "─" * (w - 2) + "┘"
 
+    cur_y = status_y
     try:
-        stdscr.addstr(status_y, 0, separator[:w])
-        stdscr.addstr(status_y + 1, 0, (status + " " * max(0, w - len(status) - 1) + "│")[:w])
+        stdscr.addstr(cur_y, 0, separator[:w])
+        cur_y += 1
+        stdscr.addstr(cur_y, 0, (status + " " * max(0, w - len(status) - 1) + "│")[:w])
+        cur_y += 1
+
+        # Debug lines
         if state.debug_lines:
-            for i, dline in enumerate(state.debug_lines[-2:]):
-                if status_y + 2 + i < h - 1:
+            for dline in state.debug_lines[-2:]:
+                if cur_y < h - 1:
                     dbg = f"│ [D] {dline}"
-                    stdscr.addstr(status_y + 2 + i, 0, (dbg + " " * max(0, w - len(dbg) - 1) + "│")[:w])
-        if status_y + 4 < h:
-            stdscr.addstr(min(status_y + 4, h - 1), 0, bottom[:w])
+                    stdscr.addstr(cur_y, 0, (dbg + " " * max(0, w - len(dbg) - 1) + "│")[:w])
+                    cur_y += 1
+
+        # Member list separator
+        if cur_y < h - 1:
+            stdscr.addstr(cur_y, 0, ("├" + "─" * (w - 2) + "┤")[:w])
+            cur_y += 1
+
+        # Member list header
+        if cur_y < h - 1:
+            hdr = "│ 成员列表:"
+            stdscr.addstr(cur_y, 0, (hdr + " " * max(0, w - len(hdr) - 1) + "│")[:w])
+            cur_y += 1
+
+        # Each member: symbol + name + full npub
+        for npub in all_npubs:
+            if cur_y >= h - 1:
+                break
+            is_self = (npub == state.own_npub)
+            symbol = "★" if is_self else "○"
+            name = state.display_name(npub)
+            if name != npub:
+                # Has nickname
+                entry = f"│  {symbol} {name} ({npub})"
+            else:
+                entry = f"│  {symbol} {npub}"
+            if is_self:
+                entry += " (你)"
+            stdscr.addstr(cur_y, 0, (entry + " " * max(0, w - len(entry) - 1) + "│")[:w])
+            cur_y += 1
+
+        # Bottom border
+        if cur_y < h:
+            stdscr.addstr(min(cur_y, h - 1), 0, bottom[:w])
     except curses.error:
         pass
 
@@ -129,6 +184,15 @@ async def tui_main(stdscr, group: str, sock_path: str, debug: bool):
     try:
         resp = await ipc_send(sock_path, "whoami", {})
         state.own_npub = resp.get("output", "?")
+    except Exception:
+        pass
+
+    # Load contacts for name resolution (npub -> nickname)
+    try:
+        resp = await ipc_send(sock_path, "contacts_raw", {})
+        if resp.get("ok"):
+            for c in resp.get("contacts", []):
+                state.contact_map[c["npub"]] = c["nickname"]
     except Exception:
         pass
 
@@ -202,17 +266,14 @@ async def tui_main(stdscr, group: str, sock_path: str, debug: bool):
 
                     if evt_type == "position" and npub != state.own_npub:
                         state.positions[npub] = (event.get("x", 0), event.get("y", 0))
-                        if npub not in state.names:
-                            state.names[npub] = npub[:10] + ".."
                         if debug:
                             state.debug_lines.append(
-                                f"Pos: {state.names[npub]} → ({event['x']},{event['y']})"
+                                f"Pos: {state.display_name(npub)} → ({event['x']},{event['y']})"
                             )
                     elif evt_type == "leave":
                         state.positions.pop(npub, None)
-                        state.names.pop(npub, None)
                         if debug:
-                            state.debug_lines.append(f"Left: {npub[:10]}")
+                            state.debug_lines.append(f"Left: {state.display_name(npub)}")
 
             except asyncio.TimeoutError:
                 pass

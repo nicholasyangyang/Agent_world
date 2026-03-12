@@ -232,6 +232,10 @@ async def handle_ipc_cmd(cmd: str, args: dict, state: GatewayState) -> dict:
         lines = [f"  @{c['nickname']}  {c['npub'][:20]}.." for c in contacts]
         return {"ok": True, "output": "联系人:\n" + "\n".join(lines)}
 
+    if cmd == "contacts_raw":
+        contacts = await DB.get_contacts(state.db)
+        return {"ok": True, "contacts": contacts}
+
     if cmd == "add_contact":
         npub = args.get("npub", "")
         nickname = args.get("nickname", "")
